@@ -1,4 +1,6 @@
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { query, withTx, carFromRow, bookingFromRow, isCarFree } from './db.js';
@@ -54,9 +56,17 @@ class HttpError extends Error {
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
+  // Behind Render's proxy, trust it so req.ip (rate limiting) and secure cookies work.
+  if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1);
+  app.use((_req, res, next) => {
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY', 'Referrer-Policy': 'strict-origin-when-cross-origin' });
+    next();
+  });
   app.use(express.json({ limit: '50kb' }));
   app.use(cookieParser());
   app.use(loadUser);
+
+  app.get('/api/health', (_req, res) => res.json({ ok: true }));
 
   // ---------- Auth ----------
   app.post('/api/auth/register', authRateLimit, async (req, res) => {
@@ -253,6 +263,14 @@ export function createApp() {
 
   // ---------- Errors ----------
   app.use('/api', (_req, _res, next) => next(new HttpError(404, 'Not found.')));
+
+  // In production, serve the built frontend from the same origin (so the session cookie just works).
+  const dist = fileURLToPath(new URL('../dist', import.meta.url));
+  if (fs.existsSync(dist)) {
+    app.use(express.static(dist, { maxAge: '1h', index: false }));
+    // Single-page app: any other GET returns index.html so client-side routes work on refresh.
+    app.get('/{*splat}', (_req, res) => res.sendFile(`${dist}/index.html`));
+  }
   app.use((err, _req, res, _next) => {
     if (err instanceof HttpError) return res.status(err.status).json({ error: err.message });
     if (err.type === 'entity.parse.failed') return res.status(400).json({ error: 'Invalid JSON.' });
